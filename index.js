@@ -61,8 +61,6 @@ fastify.all('/incoming-call', async (request, reply) => {
 fastify.register(async (fastify) => {
     fastify.get('/media-stream', { websocket: true }, (connection, req) => {
         console.log('Client connected');
-
-
         const openAiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
             headers: {
                 Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -78,6 +76,10 @@ fastify.register(async (fastify) => {
                 session: {
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
+                    input_audio_transcription: {
+                        "model": "whisper-1"
+                    },
+                    turn_detection: { type: 'server_vad' },
                     voice: VOICE,
                     instructions: SYSTEM_MESSAGE,
                     modalities: ["text", "audio"],
@@ -99,7 +101,7 @@ fastify.register(async (fastify) => {
         openAiWs.on('message', (data) => {
             try {
                 const response = JSON.parse(data);
-
+                console.log('response', response);  
                 if (LOG_EVENT_TYPES.includes(response.type)) {
                     console.log(`Received event: ${response.type}`, response);
                 }
@@ -117,8 +119,17 @@ fastify.register(async (fastify) => {
                     connection.send(JSON.stringify(audioDelta));
                 }
 
-                if (response.type === 'response.audio_transcript.done' && response.delta) {
-                    console.log('Transcript data:', response);
+                if (response.type === 'conversation.item.created') {
+                    const item = JSON.parse(response.item);
+                    console.log('response iem data:', item);
+                }
+
+                if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                    console.log('User transcription:', response.transcript); // TODO: Supabase add to user transcript
+                }
+
+                if (response.type === 'response.content_part.done') {
+                    console.log('assistant response:', response.part); // TODO: Supabase add to assistant transcript
                 }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
