@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
 import WebSocket from 'ws';
-import fs from 'fs';
 import dotenv from 'dotenv';
 import fastifyFormBody from '@fastify/formbody';
 import fastifyWs from '@fastify/websocket';
@@ -22,7 +21,7 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constants
-const SYSTEM_MESSAGE = 'You are a helpful and bubbly AI assistant who loves to chat about anything the user is interested about and is prepared to offer them facts. You have a penchant for dad jokes, owl jokes, and rickrolling – subtly. Always stay positive, but work in a joke when appropriate.';
+const SYSTEM_MESSAGE = 'Keep your answers really short. And try to listen what the other side is saying, please. You are a receiptionist for Utah Junk Movers. Utah Junk Movers works from 6am to 11pm. We operate in Salt Lake County only in Utah. We work from Monday to Saturday. We have a minimum chahrge of $120. And we chagne $40 per cubic';
 const VOICE = 'alloy';
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 
@@ -47,7 +46,7 @@ fastify.get('/', async (request, reply) => {
 fastify.all('/incoming-call', async (request, reply) => {
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open-A.I. Realtime API</Say>
+                              <Say>Please wait while I connect you to our reciptionist</Say>
                               <Pause length="1"/>
                               <Say>O.K. you can start talking!</Say>
                               <Connect>
@@ -77,7 +76,6 @@ fastify.register(async (fastify) => {
             const sessionUpdate = {
                 type: 'session.update',
                 session: {
-                    turn_detection: { type: 'server_vad' },
                     input_audio_format: 'g711_ulaw',
                     output_audio_format: 'g711_ulaw',
                     voice: VOICE,
@@ -118,6 +116,10 @@ fastify.register(async (fastify) => {
                     };
                     connection.send(JSON.stringify(audioDelta));
                 }
+
+                if (response.type === 'response.audio_transcript.done' && response.delta) {
+                    console.log('Transcript data:', response);
+                }
             } catch (error) {
                 console.error('Error processing OpenAI message:', error, 'Raw message:', data);
             }
@@ -127,7 +129,6 @@ fastify.register(async (fastify) => {
         connection.on('message', (message) => {
             try {
                 const data = JSON.parse(message);
-
                 switch (data.event) {
                     case 'media':
                         if (openAiWs.readyState === WebSocket.OPEN) {
@@ -148,7 +149,6 @@ fastify.register(async (fastify) => {
                         break;
                 }
             } catch (error) {
-                console.error('Error parsing message:', error, 'Message:', message);
             }
         });
 
