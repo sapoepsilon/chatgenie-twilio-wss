@@ -25,8 +25,8 @@ fastify.register(fastifyFormBody);
 fastify.register(fastifyWs);
 
 // Constants
-const SYSTEM_MESSAGE =
-  "Keep your answers really short, try to answer with 1 word if possible but remain helpul to the customer. And try to listen what the other side is saying, please. You are a receiptionist for Utah Junk Movers. Utah Junk Movers works from 6am to 11pm. We operate in Salt Lake County only in Utah. We work from Monday to Saturday. We have a minimum chahrge of $120. And we chagne $40 per cubic";
+let SYSTEM_MESSAGE =
+  "Keep your answers really short, try to answer with 1 word if possible but remain helpul to the customer. And try to listen what the other side is saying, please. You are a receiptionist. ";
 const VOICE = "alloy";
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 let TWILIO_CALL_ID;
@@ -87,8 +87,6 @@ fastify.all("/incoming-call", async (request, reply) => {
 
     // Log the data
     console.log(`bussinessPhoneData: ${JSON.stringify(bussinessPhoneData)}`);
-    console.log(`error: ${bussinessPhoneError}`);
-
     // Extract the business_id from the first object in the array
     if (bussinessPhoneData.length > 0) {
       businessId = bussinessPhoneData[0].business_id;
@@ -101,7 +99,28 @@ fastify.all("/incoming-call", async (request, reply) => {
     console.error(`Error fetching business phone number: ${error.message}`);
   }
 
-  
+  try {
+    const { data: businessData, error: bussinessDataError } = await supabase
+      .from("businesses")
+      .select()
+      .eq("id", businessId);
+
+    // Extract the business_id from the first object in the array
+    if (businessData.length > 0) {
+      const businessHours = JSON.parse(businessData[0].week_schedule);
+      console.log(`businessHours: ${businessHours}`);
+      SYSTEM_MESSAGE += `Business name is ${businessData[0].business_name}. `;
+      SYSTEM_MESSAGE += `Business's schedule is ${businessHours} `;
+      SYSTEM_MESSAGE += `Business tele operator insturctions are ${businessData[0].tele_operator_instructions}. `;
+    } else {
+      businessId = undefined; // Handle case where array is empty
+    }
+
+    console.log(`buiness system message : ${SYSTEM_MESSAGE}`);
+  } catch (error) {
+    console.error(`Error fetching business phone number: ${error.message}`);
+  }
+
   try {
     // Step 1: Check if the phone number exists in the 'phone_numbers' table
     const { data: phoneData, error: phoneError } = await supabase
@@ -203,6 +222,7 @@ fastify.register(async (fastify) => {
       const sessionUpdate = {
         type: "session.update",
         session: {
+          turn_detection: { type: "server_vad" },
           input_audio_format: "g711_ulaw",
           output_audio_format: "g711_ulaw",
           input_audio_transcription: {
@@ -261,15 +281,22 @@ fastify.register(async (fastify) => {
         ) {
           console.log("User transcription:", response.transcript);
           const insertTranscript = async () => {
-            const { err } = await supabase.from("transcripts").insert([
-              {
-                call_id: TWILIO_CALL_ID,
-                text: response.transcript,
-                is_agent: false,
-              },
-            ]);
-            if (err) {
-              console.error("Error inserting user transcript:", err);
+            try {
+              const { err } = await supabase.from("transcripts").insert([
+                {
+                  call_id: TWILIO_CALL_ID,
+                  text: response.transcript,
+                  is_agent: false,
+                },
+              ]);
+              if (err) {
+                console.error("Error inserting user transcript:", err);
+              }
+            } catch (error) {
+              console.error(
+                "Exception caught during transcript insertion:",
+                error
+              );
             }
           };
 
@@ -279,15 +306,22 @@ fastify.register(async (fastify) => {
         if (response.type === "response.content_part.done") {
           console.log("assistant response:", response.part); // TODO: Supabase add to assistant transcript
           const insertTranscript = async () => {
-            const { err } = await supabase.from("transcripts").insert([
-              {
-                call_id: TWILIO_CALL_ID,
-                text: response.part.transcript,
-                is_agent: true,
-              },
-            ]);
-            if (err) {
-              console.error("Error inserting user transcript:", err);
+            try {
+              const { err } = await supabase.from("transcripts").insert([
+                {
+                  call_id: TWILIO_CALL_ID,
+                  text: response.part.transcript,
+                  is_agent: true,
+                },
+              ]);
+              if (err) {
+                console.error("Error inserting assistant transcript:", err);
+              }
+            } catch (error) {
+              console.error(
+                "Exception caught during assistant transcript insertion:",
+                error
+              );
             }
           };
 
@@ -327,7 +361,9 @@ fastify.register(async (fastify) => {
             console.log("Received non-media event:", data.event);
             break;
         }
-      } catch (error) {}
+      } catch (error) {
+        console.error("Error parsing message:", error, "Message:", message);
+      }
     });
 
     // Handle connection close
@@ -345,7 +381,6 @@ fastify.register(async (fastify) => {
     openAiWs.on("close", () => {
       console.log("Disconnected from the OpenAI Realtime API");
     });
-    cd;
     openAiWs.on("error", (error) => {
       console.error("Error in the OpenAI WebSocket:", error);
     });
@@ -359,3 +394,17 @@ fastify.listen({ port: PORT }, (err) => {
   }
   console.log(`Server is listening on port ${PORT}`);
 });
+
+function parseHours(data) {
+  let result = "";
+
+  for (const [day, hours] of Object.entries(data)) {
+    if (hours.isOpen) {
+      result += `${day}: Open from ${hours.openingTime} to ${hours.closingTime}`;
+    } else {
+      result += `${day}: Closed`;
+    }
+  }
+
+  return result.trim(); // Remove trailing newline
+}
