@@ -105,20 +105,29 @@ fastify.all("/incoming-call", async (request, reply) => {
       .select()
       .eq("id", businessId);
 
+    console.log(`businessData: ${JSON.stringify(businessData)}`);
     // Extract the business_id from the first object in the array
     if (businessData.length > 0) {
-      const businessHours = JSON.parse(businessData[0].week_schedule);
-      console.log(`businessHours: ${businessHours}`);
-      SYSTEM_MESSAGE += `Business name is ${businessData[0].business_name}. `;
-      SYSTEM_MESSAGE += `Business's schedule is ${businessHours} `;
-      SYSTEM_MESSAGE += `Business tele operator insturctions are ${businessData[0].tele_operator_instructions}. `;
+      try {
+        const businessHours = parseHours(businessData[0].week_schedule);
+        console.log(`businessHours: ${businessHours}`);
+        SYSTEM_MESSAGE += `Business name is ${businessData[0].business_name}. `;
+        SYSTEM_MESSAGE += `Business's schedule is  ${businessHours} `;
+        SYSTEM_MESSAGE += `Business tele operator instructions are ${businessData[0].tele_operator_instructions}. `;
+      } catch (error) {
+        console.error("Failed to parse business hours:", error);
+        SYSTEM_MESSAGE +=
+          "Business schedule information is unavailable due to a data error. ";
+      }
     } else {
       businessId = undefined; // Handle case where array is empty
     }
 
     console.log(`buiness system message : ${SYSTEM_MESSAGE}`);
   } catch (error) {
-    console.error(`Error fetching business phone number: ${error.message}`);
+    console.error(
+      `Error fetching business phone number: ${JSON.stringify(error)}`
+    );
   }
 
   try {
@@ -400,9 +409,11 @@ function parseHours(data) {
 
   for (const [day, hours] of Object.entries(data)) {
     if (hours.isOpen) {
-      result += `${day}: Open from ${hours.openingTime} to ${hours.closingTime}`;
+      result += `${day}: Open from ${hours.openingTime || "N/A"} to ${
+        hours.closingTime || "N/A"
+      }\n`;
     } else {
-      result += `${day}: Closed`;
+      result += `${day}: Closed\n`;
     }
   }
 
