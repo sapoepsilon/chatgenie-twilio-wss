@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 import fastifyFormBody from "@fastify/formbody";
 import fastifyWs from "@fastify/websocket";
 import { createClient } from "@supabase/supabase-js";
+import { OpenAIAnswerer } from "./openaiAnswerer.js";
+import { GeminiAnswerer } from "./geminiAnswerer.js";
 
 // Load environment variables from .env file
 dotenv.config();
@@ -30,16 +32,6 @@ let SYSTEM_MESSAGE =
 const VOICE = "alloy";
 const PORT = process.env.PORT || 5050; // Allow dynamic port assignment
 let TWILIO_CALL_ID;
-// List of Event Types to log to the console. See OpenAI Realtime API Documentation. (session.updated is handled separately.)
-const LOG_EVENT_TYPES = [
-  "response.content.done",
-  "rate_limits.updated",
-  "response.done",
-  "input_audio_buffer.committed",
-  "input_audio_buffer.speech_stopped",
-  "input_audio_buffer.speech_started",
-  "session.created",
-];
 
 // Root Route
 fastify.get("/", async (request, reply) => {
@@ -200,7 +192,7 @@ fastify.all("/incoming-call", async (request, reply) => {
   }
   const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say>Please wait while I connect you to our reciptionist</Say>
+                              <Say>Please wait while I connect you to our AI assistant powered by Gemini</Say>
                               <Pause length="1"/>
                               <Say>O.K. you can start talking!</Say>
                               <Connect>
@@ -211,188 +203,350 @@ fastify.all("/incoming-call", async (request, reply) => {
   reply.type("text/xml").send(twimlResponse);
 });
 
-// WebSocket route for media-stream
-fastify.register(async (fastify) => {
-  fastify.get("/media-stream", { websocket: true }, (connection, req) => {
-    console.log("Client connected");
-    const openAiWs = new WebSocket(
-      "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01",
-      {
-        headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "OpenAI-Beta": "realtime=v1",
-        },
+// Route for Twilio to handle incoming calls with Gemini
+fastify.all("/incoming-call-gemini", async (request, reply) => {
+  const phoneNumber = request.body.From || request.body.Caller;
+  const toPhoneNumber = request.body.Called;
+  const direction = request.body.Direction;
+  const callSid = request.body.CallSid;
+  const fromCity = request.body.FromCity;
+  const fromState = request.body.FromState;
+  const fromCountry = request.body.FromCountry;
+  const callToken = request.body.CallToken;
+  let businessId = null;
+  
+  console.log(
+    "Incoming call (Gemini) from:",
+    phoneNumber,
+    "to",
+    toPhoneNumber,
+    "Direction:",
+    direction,
+    "Call SID:",
+    callSid,
+    "From City:",
+    fromCity,
+    "From State:",
+    fromState,
+    "From Country:",
+    fromCountry,
+    "Call Token:",
+    callToken
+  );
+
+  // Same business logic as the OpenAI route
+  try {
+    const { data: bussinessPhoneData, error: bussinessPhoneError } =
+      await supabase
+        .from("business_phone_numbers")
+        .select("business_id")
+        .eq("phone_number", toPhoneNumber);
+
+    console.log(`bussinessPhoneData: ${JSON.stringify(bussinessPhoneData)}`);
+    if (bussinessPhoneData.length > 0) {
+      businessId = bussinessPhoneData[0].business_id;
+    } else {
+      businessId = undefined;
+    }
+
+    console.log(`businessId: ${businessId}`);
+  } catch (error) {
+    console.error(`Error fetching business phone number: ${error.message}`);
+  }
+
+  try {
+    const { data: businessData, error: bussinessDataError } = await supabase
+      .from("businesses")
+      .select()
+      .eq("id", businessId);
+
+    console.log(`businessData: ${JSON.stringify(businessData)}`);
+    if (businessData.length > 0) {
+      try {
+        const businessHours = parseHours(businessData[0].week_schedule);
+        console.log(`businessHours: ${businessHours}`);
+        SYSTEM_MESSAGE += `Business name is ${businessData[0].business_name}. `;
+        SYSTEM_MESSAGE += `Business's schedule is  ${businessHours} `;
+        SYSTEM_MESSAGE += `Business tele operator instructions are ${businessData[0].tele_operator_instructions}. `;
+      } catch (error) {
+        console.error("Failed to parse business hours:", error);
+        SYSTEM_MESSAGE +=
+          "Business schedule information is unavailable due to a data error. ";
       }
+    } else {
+      businessId = undefined;
+    }
+
+    console.log(`buiness system message : ${SYSTEM_MESSAGE}`);
+  } catch (error) {
+    console.error(
+      `Error fetching business phone number: ${JSON.stringify(error)}`
     );
+  }
 
-    let streamSid = null;
+  // Same phone number and call tracking logic
+  try {
+    const { data: phoneData, error: phoneError } = await supabase
+      .from("phone_numbers")
+      .select("id")
+      .eq("number", phoneNumber)
+      .single();
 
-    const sendSessionUpdate = () => {
-      const sessionUpdate = {
-        type: "session.update",
-        session: {
-          turn_detection: { type: "server_vad" },
-          input_audio_format: "g711_ulaw",
-          output_audio_format: "g711_ulaw",
-          input_audio_transcription: {
-            model: "whisper-1",
-          },
-          turn_detection: { type: "server_vad" },
-          voice: VOICE,
-          instructions: SYSTEM_MESSAGE,
-          modalities: ["text", "audio"],
-          temperature: 0.8,
-        },
-      };
+    if (phoneError) {
+      console.error(`Error fetching phone number: ${phoneError.message}`);
+    }
+    console.log("phoneData", phoneData);
+    let phoneNumberId;
 
-      console.log("Sending session update:", JSON.stringify(sessionUpdate));
-      openAiWs.send(JSON.stringify(sessionUpdate));
-    };
+    try {
+      if (!phoneData) {
+        const { data: newPhone, error: insertPhoneError } = await supabase
+          .from("phone_numbers")
+          .insert([{ number: phoneNumber, name: "Unknown" }])
+          .select()
+          .single();
 
-    // Open event for OpenAI WebSocket
-    openAiWs.on("open", () => {
-      console.log("Connected to the OpenAI Realtime API");
-      setTimeout(sendSessionUpdate, 250); // Ensure connection stability, send after .25 seconds
-    });
-
-    // Listen for messages from the OpenAI WebSocket (and send to Twilio if necessary)
-    openAiWs.on("message", (data) => {
-      try {
-        const response = JSON.parse(data);
-        console.log("response", response);
-        if (LOG_EVENT_TYPES.includes(response.type)) {
-          console.log(`Received event: ${response.type}`, response);
+        if (insertPhoneError) {
+          throw new Error(
+            `Error inserting phone number: ${insertPhoneError.message}`
+          );
         }
 
-        if (response.type === "session.updated") {
-          console.log("Session updated successfully:", response);
-        }
-
-        if (response.type === "response.audio.delta" && response.delta) {
-          const audioDelta = {
-            event: "media",
-            streamSid: streamSid,
-            media: {
-              payload: Buffer.from(response.delta, "base64").toString("base64"),
-            },
-          };
-          connection.send(JSON.stringify(audioDelta));
-        }
-
-        if (response.type === "conversation.item.created") {
-          const item = JSON.parse(response.item);
-          console.log("response iem data:", item);
-        }
-
-        if (
-          response.type ===
-          "conversation.item.input_audio_transcription.completed"
-        ) {
-          console.log("User transcription:", response.transcript);
-          const insertTranscript = async () => {
-            try {
-              const { err } = await supabase.from("transcripts").insert([
-                {
-                  call_id: TWILIO_CALL_ID,
-                  text: response.transcript,
-                  is_agent: false,
-                },
-              ]);
-              if (err) {
-                console.error("Error inserting user transcript:", err);
-              }
-            } catch (error) {
-              console.error(
-                "Exception caught during transcript insertion:",
-                error
-              );
-            }
-          };
-
-          insertTranscript();
-        }
-
-        if (response.type === "response.content_part.done") {
-          console.log("assistant response:", response.part); // TODO: Supabase add to assistant transcript
-          const insertTranscript = async () => {
-            try {
-              const { err } = await supabase.from("transcripts").insert([
-                {
-                  call_id: TWILIO_CALL_ID,
-                  text: response.part.transcript,
-                  is_agent: true,
-                },
-              ]);
-              if (err) {
-                console.error("Error inserting assistant transcript:", err);
-              }
-            } catch (error) {
-              console.error(
-                "Exception caught during assistant transcript insertion:",
-                error
-              );
-            }
-          };
-
-          // Call the insert function without awaiting it
-          insertTranscript();
-        }
-      } catch (error) {
-        console.error(
-          "Error processing OpenAI message:",
-          error,
-          "Raw message:",
-          data
-        );
+        phoneNumberId = newPhone.id;
+      } else {
+        phoneNumberId = phoneData.id;
       }
-    });
+    } catch (error) {
+      console.error("Error during phone number handling:", error);
+      return;
+    }
 
-    // Handle incoming messages from Twilio
-    connection.on("message", (message) => {
-      try {
-        const data = JSON.parse(message);
-        switch (data.event) {
-          case "media":
-            if (openAiWs.readyState === WebSocket.OPEN) {
-              const audioAppend = {
-                type: "input_audio_buffer.append",
-                audio: data.media.payload,
-              };
-
-              openAiWs.send(JSON.stringify(audioAppend));
-            }
-            break;
-          case "start":
-            streamSid = data.start.streamSid;
-            console.log("Incoming stream has started", streamSid);
-            break;
-          default:
-            console.log("Received non-media event:", data.event);
-            break;
-        }
-      } catch (error) {
-        console.error("Error parsing message:", error, "Message:", message);
-      }
-    });
-
-    // Handle connection close
-    connection.on("close", (call) => {
-      if (openAiWs.readyState === WebSocket.OPEN) openAiWs.close();
-      // TODO: Get call duration and update the 'calls' table
-      console.log(`Call ${call} ended`);
-      supabase
+    try {
+      const { data: callInfo, error: callError } = await supabase
         .from("calls")
-        .update({ duration: "00:05:00" })
-        .eq("id", TWILIO_CALL_ID); // TODO: request from twilio to get the call information and to update it
-    });
+        .insert([
+          {
+            phone_number_id: phoneNumberId,
+            date: new Date().toISOString().split("T")[0],
+            time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+            duration: "00:00:00",
+          },
+        ])
+        .select()
+        .single();
 
-    // Handle WebSocket close and errors
-    openAiWs.on("close", () => {
-      console.log("Disconnected from the OpenAI Realtime API");
-    });
-    openAiWs.on("error", (error) => {
-      console.error("Error in the OpenAI WebSocket:", error);
-    });
+      console.log("callInfo", callInfo);
+      TWILIO_CALL_ID = callInfo.id;
+
+      if (callError) {
+        console.error(`Error inserting call record: ${callError.message}`);
+      }
+
+      console.log("Call record inserted successfully!");
+    } catch (error) {
+      console.error("Error inserting call record:", error);
+    }
+  } catch (error) {
+    console.error("Unexpected error occurred:", error);
+  }
+  
+  const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
+                          <Response>
+                              <Say>Please wait while I connect you to our AI assistant powered by Gemini</Say>
+                              <Pause length="1"/>
+                              <Say>O.K. you can start talking!</Say>
+                              <Connect>
+                                  <Stream url="wss://${request.headers.host}/media-stream-gemini" />
+                              </Connect>
+                          </Response>`;
+
+  reply.type("text/xml").send(twimlResponse);
+});
+
+// WebSocket route for media-stream (now using Gemini)
+fastify.register(async (fastify) => {
+  fastify.get("/media-stream", { websocket: true }, async (connection, req) => {
+    console.log("Client connected to Gemini stream");
+    
+    try {
+      const geminiAnswerer = new GeminiAnswerer(SYSTEM_MESSAGE, "Puck");
+      await geminiAnswerer.createLiveSession();
+      
+      let streamSid = null;
+
+      // Handle incoming messages from Twilio
+      connection.on("message", async (message) => {
+        try {
+          const data = JSON.parse(message);
+          
+          switch (data.event) {
+            case "media":
+              // Send audio to Gemini
+              await geminiAnswerer.handleTwilioAudio(
+                data.media.payload,
+                // Transcript callback
+                async (transcript, isAgent) => {
+                  try {
+                    const { err } = await supabase.from("transcripts").insert([
+                      {
+                        call_id: TWILIO_CALL_ID,
+                        text: transcript,
+                        is_agent: isAgent,
+                      },
+                    ]);
+                    if (err) {
+                      console.error(`Error inserting ${isAgent ? 'assistant' : 'user'} transcript:`, err);
+                    }
+                  } catch (error) {
+                    console.error(
+                      `Exception caught during ${isAgent ? 'assistant' : 'user'} transcript insertion:`,
+                      error
+                    );
+                  }
+                },
+                // Audio response callback
+                (audioBuffer) => {
+                  if (audioBuffer && streamSid) {
+                    const base64Audio = geminiAnswerer.convertAudioForTwilio(audioBuffer);
+                    if (base64Audio) {
+                      const audioDelta = {
+                        event: "media",
+                        streamSid: streamSid,
+                        media: {
+                          payload: base64Audio,
+                        },
+                      };
+                      connection.send(JSON.stringify(audioDelta));
+                    }
+                  }
+                }
+              );
+              break;
+              
+            case "start":
+              streamSid = data.start.streamSid;
+              console.log("Incoming Gemini stream has started", streamSid);
+              break;
+              
+            case "stop":
+              console.log("Twilio stream stopped - signaling end to Gemini");
+              geminiAnswerer.endAudioStream();
+              break;
+              
+            default:
+              console.log("Received non-media event:", data.event);
+              break;
+          }
+        } catch (error) {
+          console.error("Error parsing Gemini message:", error, "Message:", message);
+        }
+      });
+
+      // Handle connection close
+      connection.on("close", (call) => {
+        geminiAnswerer.close();
+        console.log(`Gemini call ${call} ended`);
+        supabase
+          .from("calls")
+          .update({ duration: "00:05:00" })
+          .eq("id", TWILIO_CALL_ID);
+      });
+
+    } catch (error) {
+      console.error("Error setting up Gemini connection:", error);
+      connection.close();
+    }
+  });
+});
+
+// WebSocket route for Gemini media-stream
+fastify.register(async (fastify) => {
+  fastify.get("/media-stream-gemini", { websocket: true }, async (connection, req) => {
+    console.log("Client connected to Gemini stream");
+    
+    try {
+      const geminiAnswerer = new GeminiAnswerer(SYSTEM_MESSAGE, "Puck");
+      await geminiAnswerer.createLiveSession();
+      
+      let streamSid = null;
+
+      // Handle incoming messages from Twilio
+      connection.on("message", async (message) => {
+        try {
+          const data = JSON.parse(message);
+          
+          switch (data.event) {
+            case "media":
+              // Send audio to Gemini
+              await geminiAnswerer.handleTwilioAudio(
+                data.media.payload,
+                // Transcript callback
+                async (transcript, isAgent) => {
+                  try {
+                    const { err } = await supabase.from("transcripts").insert([
+                      {
+                        call_id: TWILIO_CALL_ID,
+                        text: transcript,
+                        is_agent: isAgent,
+                      },
+                    ]);
+                    if (err) {
+                      console.error(`Error inserting ${isAgent ? 'assistant' : 'user'} transcript:`, err);
+                    }
+                  } catch (error) {
+                    console.error(
+                      `Exception caught during ${isAgent ? 'assistant' : 'user'} transcript insertion:`,
+                      error
+                    );
+                  }
+                },
+                // Audio response callback (for future TTS integration)
+                (audioBuffer) => {
+                  if (audioBuffer && streamSid) {
+                    const base64Audio = geminiAnswerer.convertAudioForTwilio(audioBuffer);
+                    if (base64Audio) {
+                      const audioDelta = {
+                        event: "media",
+                        streamSid: streamSid,
+                        media: {
+                          payload: base64Audio,
+                        },
+                      };
+                      connection.send(JSON.stringify(audioDelta));
+                    }
+                  }
+                }
+              );
+              break;
+              
+            case "start":
+              streamSid = data.start.streamSid;
+              console.log("Incoming Gemini stream has started", streamSid);
+              break;
+              
+            default:
+              console.log("Received non-media event:", data.event);
+              break;
+          }
+        } catch (error) {
+          console.error("Error parsing Gemini message:", error, "Message:", message);
+        }
+      });
+
+      // Handle connection close
+      connection.on("close", (call) => {
+        geminiAnswerer.close();
+        console.log(`Gemini call ${call} ended`);
+        supabase
+          .from("calls")
+          .update({ duration: "00:05:00" })
+          .eq("id", TWILIO_CALL_ID);
+      });
+
+    } catch (error) {
+      console.error("Error setting up Gemini connection:", error);
+      connection.close();
+    }
   });
 });
 
